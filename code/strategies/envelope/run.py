@@ -25,11 +25,11 @@ params = {
     'use_shorts': True,  # set to False if you want to use only longs
 }
 
-key_path = 'TradingBots/secret.json'
+key_path = 'TradingBot/secret.json'
 key_name = 'envelope'
 
-tracker_file = f"TradingBots/code/strategies/envelope/tracker_{params['symbol'].replace('/', '-').replace(':', '-')}.json"
-pnl_log_file = f"TradingBots/code/strategies/envelope/pnl_log_{params['symbol'].replace('/', '-').replace(':', '-')}.xlsx"
+tracker_file = f"TradingBot/code/strategies/envelope/tracker_{params['symbol'].replace('/', '-').replace(':', '-')}.json"
+pnl_log_file = f"TradingBot/code/strategies/envelope/pnl_log_{params['symbol'].replace('/', '-').replace(':', '-')}.xlsx"
 
 trigger_price_delta = 0.005  # what I use for a 1h timeframe
 # trigger_price_delta = 0.0015  # what I use for a 15m timeframe
