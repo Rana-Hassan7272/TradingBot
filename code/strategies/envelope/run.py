@@ -2,12 +2,12 @@ import os
 import sys
 import json
 import ta
+import pandas as pd
 from datetime import datetime
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from utilities.bitget_futures import BitgetFutures
-
 
 # --- CONFIG ---
 params = {
@@ -29,16 +29,23 @@ key_path = 'LiveTradingBots/secret.json'
 key_name = 'envelope'
 
 tracker_file = f"LiveTradingBots/code/strategies/envelope/tracker_{params['symbol'].replace('/', '-').replace(':', '-')}.json"
+pnl_log_file = f"LiveTradingBots/code/strategies/envelope/pnl_log_{params['symbol'].replace('/', '-').replace(':', '-')}.xlsx"
 
 trigger_price_delta = 0.005  # what I use for a 1h timeframe
 # trigger_price_delta = 0.0015  # what I use for a 15m timeframe
+
+# --- Initialize P&L Log ---
+if not os.path.exists(pnl_log_file):
+    pnl_df = pd.DataFrame(columns=["Timestamp", "Action", "Side", "Quantity", "Entry Price", "Exit Price", "P&L", "Cumulative P&L"])
+    pnl_df.to_excel(pnl_log_file, index=False)
+else:
+    pnl_df = pd.read_excel(pnl_log_file)
 
 # --- AUTHENTICATION ---
 print(f"\n{datetime.now().strftime('%H:%M:%S')}: >>> starting execution for {params['symbol']}")
 with open(key_path, "r") as f:
     api_setup = json.load(f)[key_name]
 bitget = BitgetFutures(api_setup)
-
 
 # --- TRACKER FILE ---
 if not os.path.exists(tracker_file):
@@ -53,11 +60,30 @@ def update_tracker_file(file_path, data):
     with open(file_path, 'w') as file:
         json.dump(data, file)
 
+# --- P&L Logging Function ---
+def log_pnl(action, side, quantity, entry_price, exit_price, pnl):
+    global pnl_df
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cumulative_pnl = pnl_df["P&L"].sum() + pnl if "P&L" in pnl_df.columns else pnl
+    new_row = {
+        "Timestamp": timestamp,
+        "Action": action,
+        "Side": side,
+        "Quantity": quantity,
+        "Entry Price": entry_price,
+        "Exit Price": exit_price,
+        "P&L": pnl,
+        "Cumulative P&L": cumulative_pnl,
+    }
+    pnl_df = pnl_df.append(new_row, ignore_index=True)
+    pnl_df.to_excel(pnl_log_file, index=False)
+    print(f"{timestamp}: P&L Log Updated - {action} | Side: {side} | Quantity: {quantity} | Entry: {entry_price} | Exit: {exit_price} | P&L: {pnl} | Cumulative P&L: {cumulative_pnl}")
 
 # --- CANCEL OPEN ORDERS ---
 orders = bitget.fetch_open_orders(params['symbol'])
 for order in orders:
     bitget.cancel_order(order['id'], params['symbol'])
+    print(f"{datetime.now().strftime('%H:%M:%S')}: Cancelled order {order['id']}")
 trigger_orders = bitget.fetch_open_trigger_orders(params['symbol'])
 long_orders_left = 0
 short_orders_left = 0
@@ -67,8 +93,8 @@ for order in trigger_orders:
     elif order['side'] == 'sell' and order['info']['tradeSide'] == 'open':
         short_orders_left += 1
     bitget.cancel_trigger_order(order['id'], params['symbol'])
+    print(f"{datetime.now().strftime('%H:%M:%S')}: Cancelled trigger order {order['id']}")
 print(f"{datetime.now().strftime('%H:%M:%S')}: orders cancelled, {long_orders_left} longs left, {short_orders_left} shorts left")
-
 
 # --- FETCH OHLCV DATA, CALCULATE INDICATORS ---
 data = bitget.fetch_recent_ohlcv(params['symbol'], params['timeframe'], 100).iloc[:-1]
@@ -89,7 +115,6 @@ for i, e in enumerate(params['envelopes']):
     data[f'band_low_{i + 1}'] = data['average'] * (1 - e)
 print(f"{datetime.now().strftime('%H:%M:%S')}: ohlcv data fetched")
 
-
 # --- CHECKS IF STOP LOSS WAS TRIGGERED ---
 closed_orders = bitget.fetch_closed_trigger_orders(params['symbol'])
 tracker_info = read_tracker_file(tracker_file)
@@ -100,7 +125,7 @@ if len(closed_orders) > 0 and closed_orders[-1]['id'] in tracker_info['stop_loss
         "stop_loss_ids": [],
     })
     print(f"{datetime.now().strftime('%H:%M:%S')}: /!\\ stop loss was triggered")
-
+    log_pnl("Stop Loss Triggered", closed_orders[-1]['info']['posSide'], closed_orders[-1]['amount'], closed_orders[-1]['price'], closed_orders[-1]['price'], -abs(float(closed_orders[-1]['amount']) * (float(closed_orders[-1]['price']) - float(closed_orders[-1]['info']['openPriceAvg']))))
 
 # --- CHECK FOR MULTIPLE OPEN POSITIONS AND CLOSE THE EARLIEST ONE ---
 positions = bitget.fetch_open_positions(params['symbol'])
@@ -110,7 +135,7 @@ if positions:
     for pos in sorted_positions[1:]:
         bitget.flash_close_position(pos['symbol'], side=pos['side'])
         print(f"{datetime.now().strftime('%H:%M:%S')}: double position case, closing the {pos['side']}.")
-
+        log_pnl("Position Closed", pos['side'], pos['contracts'], pos['entryPrice'], pos['markPrice'], float(pos['contracts']) * (float(pos['markPrice']) - float(pos['entryPrice'])) if pos['side'] == 'long' else float(pos['contracts']) * (float(pos['entryPrice']) - float(pos['markPrice'])))
 
 # --- CHECKS IF A POSITION IS OPEN ---
 position = bitget.fetch_open_positions(params['symbol'])
@@ -118,7 +143,6 @@ open_position = True if len(position) > 0 else False
 if open_position:
     position = position[0]
     print(f"{datetime.now().strftime('%H:%M:%S')}: {position['side']} position of {round(position['contracts'] * position['contractSize'],2)} ~ {round(position['contracts'] * position['contractSize'] * position['markPrice'],2)} USDT is running")
-
 
 # --- CHECKS IF CLOSE ALL SHOULD TRIGGER ---
 if 'price_jump_pct' in params and open_position:
@@ -131,6 +155,7 @@ if 'price_jump_pct' in params and open_position:
                 "stop_loss_ids": [],
             })
             print(f"{datetime.now().strftime('%H:%M:%S')}: /!\\ close all was triggered")
+            log_pnl("Close All Triggered", position['side'], position['contracts'], position['entryPrice'], position['markPrice'], float(position['contracts']) * (float(position['markPrice']) - float(position['entryPrice'])) if position['side'] == 'long' else float(position['contracts']) * (float(position['entryPrice']) - float(position['markPrice'])))
 
     elif position['side'] == 'short':
         if data['close'].iloc[-1] > float(position['info']['openPriceAvg']) * (1 + params['price_jump_pct']):
@@ -141,7 +166,7 @@ if 'price_jump_pct' in params and open_position:
                 "stop_loss_ids": [],
             })
             print(f"{datetime.now().strftime('%H:%M:%S')}: /!\\ close all was triggered")
-
+            log_pnl("Close All Triggered", position['side'], position['contracts'], position['entryPrice'], position['markPrice'], float(position['contracts']) * (float(position['markPrice']) - float(position['entryPrice'])) if position['side'] == 'long' else float(position['contracts']) * (float(position['entryPrice']) - float(position['markPrice'])))
 
 # --- OK TO TRADE CHECK ---
 tracker_info = read_tracker_file(tracker_file)
@@ -157,12 +182,10 @@ if tracker_info['status'] != "ok_to_trade":
         print(f"{datetime.now().strftime('%H:%M:%S')}: <<< status is still {tracker_info['status']}")
         sys.exit()
 
-
 # --- SET POSITION MODE, MARGIN MODE, LEVERAGE ---
 if not open_position:
     bitget.set_margin_mode(params['symbol'], margin_mode=params['margin_mode'])
     bitget.set_leverage(params['symbol'], margin_mode=params['margin_mode'], leverage=params['leverage'])
-
 
 # --- IF OPEN POSITION CHANGE TP AND SL ---
 if open_position:
@@ -183,6 +206,7 @@ if open_position:
         reduce=True,
         print_error=True,
     )
+    print(f"{datetime.now().strftime('%H:%M:%S')}: placed exit {position['side']} order at {data['average'].iloc[-1]}")
     # sl
     sl_order = bitget.place_trigger_market_order(
         symbol=params['symbol'],
@@ -206,7 +230,6 @@ else:
         "last_side": tracker_info['last_side'],
         "stop_loss_ids": [],
     }
-
 
 # --- FETCHING AND COMPUTING BALANCE ---
 balance = params['balance_fraction'] * params['leverage'] * bitget.fetch_balance()['USDT']['total']
